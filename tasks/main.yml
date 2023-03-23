@@ -1,0 +1,81 @@
+---
+- name: Include OS-specific variables.
+  include_vars: "{{ ansible_os_family }}.yml"
+
+- name: Define php_xdebug_module_path.
+  set_fact:
+    php_xdebug_module_path: "{{ __php_xdebug_module_path }}"
+  when: php_xdebug_module_path is not defined
+
+- name: Define php_xdebug_config_filename.
+  set_fact:
+    php_xdebug_config_filename: "{{ __php_xdebug_config_filename }}"
+  when: php_xdebug_config_filename is not defined
+
+- name: Ensure dependencies for building from source are installed (RedHat).
+  yum:
+    name: '@development'
+    state: present
+  when: ansible_os_family == 'RedHat'
+
+- name: Ensure dependencies for building from source are installed (Debian).
+  apt:
+    name: build-essential
+    state: present
+  when: ansible_os_family == 'Debian'
+
+- name: Untar Xdebug.
+  unarchive:
+    src: "https://xdebug.org/files/xdebug-{{ php_xdebug_version }}.tgz"
+    dest: "{{ workspace }}"
+    creates: "{{ workspace }}/xdebug-{{ php_xdebug_version }}"
+    copy: false
+    mode: 0755
+
+- name: Build Xdebug.
+  command: >
+    {{ item }}
+    chdir={{ workspace }}/xdebug-{{ php_xdebug_version }}
+    creates={{ workspace }}/xdebug-{{ php_xdebug_version }}/modules/xdebug.so
+  with_items:
+    - phpize
+    - ./configure
+    - make
+
+- name: Ensure Xdebug module path exists.
+  file:
+    path: "{{ php_xdebug_module_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: 0755
+
+- name: Move Xdebug module into place.
+  copy:
+    src: "{{ workspace }}/xdebug-{{ php_xdebug_version }}/modules/xdebug.so"
+    dest: "{{ php_xdebug_module_path }}/xdebug-{{ php_xdebug_version }}.so"
+    remote_src: true
+    mode: 0644
+  notify: restart webserver
+
+- name: Copy xdebug ini into main extension config folder.
+  template:
+    src: xdebug.ini.j2
+    dest: "{{ item }}/{{ php_xdebug_config_filename }}"
+    owner: root
+    group: root
+    mode: 0644
+  when: "'cli' not in item or ('cli' in item and not php_xdebug_cli_disable)"
+  with_items: "{{ php_extension_conf_paths }}"
+  notify:
+    - restart webserver
+    - restart php-fpm
+
+- name: Disable xdebug for PHP CLI.
+  file:
+    path: "/etc/php/{{ php_version }}/cli/conf.d/{{ php_xdebug_config_filename }}"
+    state: absent
+  when: ansible_os_family == 'Debian' and php_xdebug_cli_disable
+  notify:
+    - restart webserver
+    - restart php-fpm
